@@ -48,6 +48,8 @@ enum ProtoSchedulingStrategy {
   SCHEDULER_TYPE_MIN_CUT = 3;
   // A scheduler which randomly schedules nodes. For internal testing only.
   SCHEDULER_TYPE_RANDOM = 4;
+  // A standalone heuristic scheduler intended for rapid algorithm iteration.
+  SCHEDULER_TYPE_AGENT = 5;
 }
 
 message SchedulingFailureBehaviorProto {

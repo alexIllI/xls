@@ -51,6 +51,8 @@ ProtoSchedulingStrategy ToProtoSchedulingStrategy(SchedulingStrategy strategy) {
       return ProtoSchedulingStrategy::SCHEDULER_TYPE_SDC;
     case SchedulingStrategy::RANDOM:
       return ProtoSchedulingStrategy::SCHEDULER_TYPE_RANDOM;
+    case SchedulingStrategy::AGENT:
+      return ProtoSchedulingStrategy::SCHEDULER_TYPE_AGENT;
   }
 }
 SchedulingStrategy FromProtoSchedulingStrategy(
@@ -65,6 +67,8 @@ SchedulingStrategy FromProtoSchedulingStrategy(
       return SchedulingStrategy::SDC;
     case ProtoSchedulingStrategy::SCHEDULER_TYPE_RANDOM:
       return SchedulingStrategy::RANDOM;
+    case ProtoSchedulingStrategy::SCHEDULER_TYPE_AGENT:
+      return SchedulingStrategy::AGENT;
     default:
       LOG(FATAL) << "Unknown scheduling strategy: " << strategy;
   }
@@ -85,6 +89,8 @@ bool AbslParseFlag(std::string_view text, SchedulingStrategy* strategy,
     *strategy = SchedulingStrategy::SDC;
   } else if (str_text == "random") {
     *strategy = SchedulingStrategy::RANDOM;
+  } else if (str_text == "agent") {
+    *strategy = SchedulingStrategy::AGENT;
   } else {
     *error = absl::StrCat("Unknown scheduling strategy: ", text);
     return false;
@@ -102,6 +108,8 @@ std::string AbslUnparseFlag(const SchedulingStrategy& strategy) {
       return "sdc";
     case SchedulingStrategy::RANDOM:
       return "random";
+    case SchedulingStrategy::AGENT:
+      return "agent";
   }
 }
 

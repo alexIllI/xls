@@ -61,6 +61,7 @@
 #include "xls/ir/proc_elaboration.h"
 #include "xls/ir/topo_sort.h"
 #include "xls/scheduling/min_cut_scheduler.h"
+#include "xls/scheduling/agent_generated_scheduler.h"
 #include "xls/scheduling/pipeline_schedule.h"
 #include "xls/scheduling/schedule_bounds.h"
 #include "xls/scheduling/schedule_graph.h"
@@ -744,6 +745,13 @@ absl::StatusOr<PipelineSchedule> RunPipelineScheduleInternal(
       XLS_ASSIGN_OR_RETURN(
           cycle_map,
           MinCutScheduler(
+              f,
+              options.pipeline_stages().value_or(bounds.max_lower_bound() + 1),
+              clock_period_ps, io_delay_added, &bounds, options.constraints()));
+    } else if (options.strategy() == SchedulingStrategy::AGENT) {
+      XLS_ASSIGN_OR_RETURN(
+          cycle_map,
+          AgentGeneratedScheduler(
               f,
               options.pipeline_stages().value_or(bounds.max_lower_bound() + 1),
               clock_period_ps, io_delay_added, &bounds, options.constraints()));

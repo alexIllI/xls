@@ -60,6 +60,9 @@ enum class SchedulingStrategy : int8_t {
 
   // Create a random but sound schedule. This is useful for testing.
   RANDOM,
+
+  // A standalone heuristic scheduler intended for rapid algorithm iteration.
+  AGENT,
 };
 
 ProtoSchedulingStrategy ToProtoSchedulingStrategy(SchedulingStrategy strategy);

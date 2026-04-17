@@ -264,10 +264,28 @@ cc_library(
 )
 
 cc_library(
+    name = "agent_generated_scheduler",
+    srcs = ["agent_generated_scheduler.cc"],
+    hdrs = ["agent_generated_scheduler.h"],
+    deps = [
+        ":schedule_bounds",
+        ":schedule_graph",
+        ":scheduling_options",
+        "//xls/common/status:status_macros",
+        "//xls/estimators/delay_model:delay_estimator",
+        "//xls/ir",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
     name = "run_pipeline_schedule",
     srcs = ["run_pipeline_schedule.cc"],
     hdrs = ["run_pipeline_schedule.h"],
     deps = [
+        ":agent_generated_scheduler",
         ":min_cut_scheduler",
         ":pipeline_schedule",
         ":schedule_bounds",

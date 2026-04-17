@@ -86,7 +86,7 @@ ABSL_FLAG(xls::SchedulingStrategy, scheduling_strategy,
           xls::SchedulingStrategy::SDC,
           "Scheduler algorithm to use.\n"
           "\n"
-          "Options: [sdc, asap, min_cut, random]\n"
+          "Options: [sdc, asap, min_cut, random, agent]\n"
           "\n"
           "Standard Scheduler:\n"
           "sdc: Default. Constraint based scheduling to minimize registers.\n"
@@ -101,7 +101,9 @@ ABSL_FLAG(xls::SchedulingStrategy, scheduling_strategy,
           "min-cut based algorithm.\n"
           "         Does not respect io_constraints.\n"
           "random: Randomly schedules nodes. For internal testing only.\n"
-          "        Does not respect io_constraints.");
+          "        Does not respect io_constraints.\n"
+          "agent: Standalone heuristic scheduler for rapid algorithm "
+          "iteration.\n");
 ABSL_FLAG(int64_t, clock_margin_percent, 0,
           "The percentage of clock period to set aside as a margin to ensure "
           "timing is met. Effectively, this lowers the clock period by this "
