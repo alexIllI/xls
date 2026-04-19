@@ -161,7 +161,9 @@ absl::StatusOr<bool> ClampArrayIndexIndices(FunctionBase* func,
                                             OptimizationContext& context,
                                             const QueryEngine& query_engine) {
   bool changed = false;
-  for (Node* node : context.TopoSort(func)) {
+  XLS_ASSIGN_OR_RETURN(std::vector<Node*> topo_sort_nodes,
+                       context.TopoSort(func));
+  for (Node* node : topo_sort_nodes) {
     if (node->Is<ArrayIndex>()) {
       ArrayIndex* array_index = node->As<ArrayIndex>();
       Type* subtype = array_index->array()->GetType();
@@ -653,12 +655,7 @@ absl::StatusOr<SimplifyResult> SimplifyArrayIndex(
     VLOG(2) << "Replacing " << array_index << " with select using "
             << array_update << " context";
     FunctionBase* fb = array_update->function_base();
-    auto name_fmt = [&](Node* src, std::string_view postfix) -> std::string {
-      if (src->HasAssignedName()) {
-        return absl::StrCat(src->GetNameView(), postfix);
-      }
-      return "";
-    };
+
     int64_t array_bounds = array_update->GetType()->AsArrayOrDie()->size() - 1;
     XLS_ASSIGN_OR_RETURN(Node * bounded_arr_idx,
                          UnsignedUpperBoundLiteral(
@@ -666,13 +663,14 @@ absl::StatusOr<SimplifyResult> SimplifyArrayIndex(
     XLS_ASSIGN_OR_RETURN(
         Node * index_is_updated_value,
         CompareNumeric(array_update->indices().front(), bounded_arr_idx,
-                       Op::kEq, name_fmt(array_index, "_is_updated_value")));
+                       Op::kEq,
+                       NodeNameConcat(array_index, "_is_updated_value")));
     XLS_ASSIGN_OR_RETURN(
         Node * old_value_get,
         fb->MakeNodeWithName<ArrayIndex>(
             array_index->loc(), array_update->array_to_update(),
             array_index->indices(), array_index->assumed_in_bounds(),
-            name_fmt(array_index, "_former_value")));
+            NodeNameConcat(array_index, "_former_value")));
     XLS_RETURN_IF_ERROR(
         array_index
             ->ReplaceUsesWithNew<PrioritySelect>(
@@ -862,18 +860,14 @@ absl::StatusOr<SimplifyResult> SimplifyArrayUpdate(
         // can be elided.
         replacement_entry = array_update->update_value();
       } else {
-        std::string name;
-        if (array_update->HasAssignedName()) {
-          name =
-              absl::StrCat(array_update->GetName(), "__entry_", concrete_index);
-        }
         XLS_ASSIGN_OR_RETURN(
             replacement_entry,
             func->MakeNodeWithName<ArrayUpdate>(
                 array_update->loc(), array_to_update->operand(concrete_index),
                 array_update->update_value(),
                 array_update->indices().subspan(1),
-                array_update->assumed_in_bounds(), name));
+                array_update->assumed_in_bounds(),
+                NodeNameFormat("%s__entry_%d", array_update, concrete_index)));
       }
       // If the index is fully known, then since we're compatible, this entry
       // is always replaced. Otherwise, we replace if the index matches.
@@ -1276,7 +1270,9 @@ absl::StatusOr<bool> FlattenSequentialUpdates(FunctionBase* func,
   // Perform this optimization in reverse topo sort order because we are looking
   // for a sequence of array update operations and the search progress upwards
   // (toward parameters).
-  for (Node* node : context.ReverseTopoSort(func)) {
+  XLS_ASSIGN_OR_RETURN(std::vector<Node*> reverse_topo_sort_nodes,
+                       context.ReverseTopoSort(func));
+  for (Node* node : reverse_topo_sort_nodes) {
     if (!node->Is<ArrayUpdate>()) {
       continue;
     }
@@ -1760,7 +1756,9 @@ absl::StatusOr<bool> ArraySimplificationPass::RunOnFunctionBaseInternal(
   // PrioritySelect operations. By favoring reverse-topo-sort order, we give
   // ourselves the best chance of collapsing (e.g.) array updates written as
   // separate updates for each dimension.
-  for (Node* node : context.ReverseTopoSort(func)) {
+  XLS_ASSIGN_OR_RETURN(std::vector<Node*> reverse_topo_sort_nodes,
+                       context.ReverseTopoSort(func));
+  for (Node* node : reverse_topo_sort_nodes) {
     if (!node->IsDead() &&
         node->OpIn({Op::kArray, Op::kArrayIndex, Op::kArrayUpdate, Op::kSel,
                     Op::kPrioritySel, Op::kArraySlice})) {

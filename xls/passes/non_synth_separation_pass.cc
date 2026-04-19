@@ -163,10 +163,9 @@ class CloneProcAsFunctionVisitor : public DfsVisitorWithDefault {
     // We don't need to hold the token itself.
     Type* inp_type = receive->package()->GetTupleType(
         receive->GetType()->AsTupleOrDie()->element_types().subspan(1));
-    std::string param_name =
-        receive->HasAssignedName()
-            ? absl::StrCat(receive->GetNameView(), "_param")
-            : absl::StrFormat("recv_%d_param", receive->id());
+    std::string param_name = NodeNameFormat(
+        "%v_param",
+        NodeNameOr{receive, absl::StrFormat("recv_%d", receive->id())});
     XLS_ASSIGN_OR_RETURN(Node * param,
                          non_synth_function_->MakeNodeWithName<Param>(
                              receive->loc(), inp_type, param_name));
@@ -190,14 +189,13 @@ class CloneProcAsFunctionVisitor : public DfsVisitorWithDefault {
               state_read->loc().Extend(non_synth_loc_), Value::Token()));
       return absl::OkStatus();
     }
-    std::string param_name =
-        state_read->HasAssignedName()
-            ? absl::StrCat(state_read->GetNameView(), "_param")
-            : absl::StrFormat("state_read_%d_param", state_read->id());
-    std::string nonsynth_read_name =
-        state_read->HasAssignedName()
-            ? absl::StrCat(state_read->GetNameView(), "_non_synth_read")
-            : absl::StrFormat("state_read_%d_non_synth", state_read->id());
+    std::string param_name = NodeNameFormat(
+        "%v_param", NodeNameOr{state_read, absl::StrFormat("state_read_%d",
+                                                           state_read->id())});
+    std::string nonsynth_read_name = NodeNameFormat(
+        "%v_non_synth_read",
+        NodeNameOr{state_read,
+                   absl::StrFormat("state_read_%d", state_read->id())});
     std::string nonsynth_element_name =
         absl::StrCat(state_read->state_element()->name(), "_non_synth");
     // First clone the state-read and state element to get a non-synth element.
@@ -279,10 +277,7 @@ class CloneProcAsFunctionVisitor : public DfsVisitorWithDefault {
         << "Did not create a non_synth state element for " << next;
     StateRead* non_synth =
         non_synth_reads_map_[next->state_read()->As<StateRead>()];
-    std::string non_synth_name =
-        next->HasAssignedName()
-            ? absl::StrFormat("%s_non_synth", next->GetNameView())
-            : "";
+    std::string non_synth_name = NodeNameFormat("%s_non_synth", next);
     XLS_RETURN_IF_ERROR(
         next->function_base()
             ->MakeNodeWithName<Next>(next->loc(), non_synth, next->value(),
@@ -341,7 +336,9 @@ absl::StatusOr<std::pair<Function*, std::vector<Node*>>> CloneProcAsFunction(
   CloneProcAsFunctionVisitor clone_function_visitor(
       f, /*loc_name=*/absl::StrFormat(
           "<Generated non-synthesizable function for %s>", proc->name()));
-  for (Node* n : context.TopoSort(proc)) {
+  XLS_ASSIGN_OR_RETURN(std::vector<Node*> topo_sort_nodes,
+                       context.TopoSort(proc));
+  for (Node* n : topo_sort_nodes) {
     XLS_RETURN_IF_ERROR(n->VisitSingleNode(&clone_function_visitor));
   }
   return std::make_pair(clone_function_visitor.f(),
@@ -409,12 +406,16 @@ absl::StatusOr<bool> NonSynthSeparationPass::RunInternal(
     // select nodes because gates are special power-optimization nodes that we
     // generally won't remove so we don't want to duplicate them.
     ReplaceGatesWithSelectsVisitor replace_gates_visitor(non_synth_function);
-    for (Node* node : context.TopoSort(non_synth_function)) {
+    XLS_ASSIGN_OR_RETURN(std::vector<Node*> non_synth_nodes,
+                         context.TopoSort(non_synth_function));
+    for (Node* node : non_synth_nodes) {
       XLS_RETURN_IF_ERROR(node->VisitSingleNode(&replace_gates_visitor));
     }
     // Remove the non-synthesizable nodes from the original function base.
     RemoveNonSynthNodesVisitor remove_visitor(function_base);
-    for (Node* node : context.TopoSort(function_base)) {
+    XLS_ASSIGN_OR_RETURN(std::vector<Node*> topo_sort_nodes,
+                         context.TopoSort(function_base));
+    for (Node* node : topo_sort_nodes) {
       XLS_RETURN_IF_ERROR(node->VisitSingleNode(&remove_visitor));
     }
   }

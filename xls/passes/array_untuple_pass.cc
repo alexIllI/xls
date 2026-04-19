@@ -58,11 +58,12 @@ namespace xls {
 
 namespace {
 // Group all nodes together based on whether they need to be updated together.
-UnionFind<Node*> FindUntupleGroups(FunctionBase* f,
-                                   OptimizationContext& context) {
+absl::StatusOr<UnionFind<Node*>> FindUntupleGroups(
+    FunctionBase* f, OptimizationContext& context) {
   UnionFind<Node*> array_groups;
   // To make things simpler every node is put in the union-find.
-  for (Node* n : context.TopoSort(f)) {
+  XLS_ASSIGN_OR_RETURN(std::vector<Node*> topo_sort_nodes, context.TopoSort(f));
+  for (Node* n : topo_sort_nodes) {
     array_groups.Insert(n);
     if (n->Is<ArrayUpdate>()) {  // Array modification
       array_groups.Union(n->As<ArrayUpdate>()->array_to_update(), n);
@@ -576,9 +577,7 @@ class UntupleVisitor : public DfsVisitorWithDefault {
   }
   // Give a name for the untupled values.
   std::string IdxName(Node* n, int64_t idx) const {
-    return n->HasAssignedName()
-               ? absl::StrFormat("%s_tuple_idx_%d", n->GetName(), idx)
-               : "";
+    return NodeNameFormat("%s_tuple_idx_%d", n, idx);
   }
   // Check if the node is eligible for and not excluded from untuple-ing
   bool CanUntuple(Node* n) {
@@ -608,13 +607,14 @@ absl::StatusOr<bool> ArrayUntuplePass::RunOnFunctionBaseInternal(
     // Don't mess with blocks.
     return false;
   }
-  UnionFind<Node*> groups = FindUntupleGroups(f, context);
+  XLS_ASSIGN_OR_RETURN(UnionFind<Node*> groups, FindUntupleGroups(f, context));
   // Get the set of representative elements which are in groups with external
   // uses and so cannot be (profitably) array-of-structs-ified
   XLS_ASSIGN_OR_RETURN(absl::flat_hash_set<Node*> excluded,
                        FindExternalGroups(f, groups));
+  XLS_ASSIGN_OR_RETURN(std::vector<Node*> topo_sort_nodes, context.TopoSort(f));
   UntupleVisitor vis(groups, excluded);
-  for (Node* n : context.TopoSort(f)) {
+  for (Node* n : topo_sort_nodes) {
     XLS_RETURN_IF_ERROR(n->VisitSingleNode(&vis)) << n;
   }
   // XLS_RETURN_IF_ERROR(f->Accept(&vis));

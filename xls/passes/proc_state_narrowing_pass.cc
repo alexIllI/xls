@@ -32,6 +32,7 @@
 #include "xls/ir/bits.h"
 #include "xls/ir/interval_ops.h"
 #include "xls/ir/node.h"
+#include "xls/ir/node_util.h"
 #include "xls/ir/nodes.h"
 #include "xls/ir/op.h"
 #include "xls/ir/proc.h"
@@ -62,7 +63,7 @@ struct ProcStateNarrowTransform : public Proc::StateElementTransformer {
     return proc->MakeNodeWithName<BitSlice>(
         old_next->loc(), old_next->value(), /*start=*/0,
         /*width=*/new_state_read->GetType()->GetFlatBitCount(),
-        absl::StrFormat("unexpand_for_%s", old_next->GetName()));
+        NodeNameFormat("unexpand_for_%s", old_next));
   }
 
  private:
@@ -97,15 +98,13 @@ class ProcStateConcatNarrowTransform : public ProcStateNarrowTransform {
   Bits leading_bits_;
 };
 
-absl::Status RemoveLeadingBits(StateRead* state_read,
+absl::Status RemoveLeadingBits(Proc* proc, StateElement* state_element,
                                const Value& orig_init_value,
                                const Bits& known_leading) {
   Value new_init_value(orig_init_value.bits().Slice(
       0, orig_init_value.bits().bit_count() - known_leading.bit_count()));
   ProcStateConcatNarrowTransform transform(known_leading);
-  return state_read->function_base()
-      ->AsProcOrDie()
-      ->TransformStateElement(state_read, new_init_value, transform)
+  return proc->TransformStateElement(state_element, new_init_value, transform)
       .status();
 }
 
@@ -125,14 +124,12 @@ class ProcStateSignExtendNarrowTransform : public ProcStateNarrowTransform {
   }
 };
 
-absl::Status RemoveSignBits(StateRead* state_read, const Value& orig_init_value,
-                            int64_t real_size) {
+absl::Status RemoveSignBits(Proc* proc, StateElement* state_element,
+                            const Value& orig_init_value, int64_t real_size) {
   Value new_init_value(orig_init_value.bits().Slice(0, real_size));
-  ProcStateSignExtendNarrowTransform transform(state_read->BitCountOrDie() -
-                                               real_size);
-  return state_read->function_base()
-      ->AsProcOrDie()
-      ->TransformStateElement(state_read, new_init_value, transform)
+  ProcStateSignExtendNarrowTransform transform(
+      state_element->type()->GetFlatBitCount() - real_size);
+  return proc->TransformStateElement(state_element, new_init_value, transform)
       .status();
 }
 
@@ -181,7 +178,7 @@ absl::StatusOr<bool> ProcStateNarrowingPass::RunOnProcInternal(
               << " bits (removing " << known_leading
               << " bits) using known-leading bits.";
       XLS_RETURN_IF_ERROR(RemoveLeadingBits(
-          state_read, orig_init_value,
+          proc, state_element, orig_init_value,
           ternary_ops::ToKnownBitsValues(known_leading_tern)));
       made_changes = true;
       continue;
@@ -196,7 +193,7 @@ absl::StatusOr<bool> ProcStateNarrowingPass::RunOnProcInternal(
               << (state_read->BitCountOrDie() - known_leading)
               << " bits (removing " << known_leading
               << " bits) using sign-extend.";
-      XLS_RETURN_IF_ERROR(RemoveSignBits(state_read, orig_init_value,
+      XLS_RETURN_IF_ERROR(RemoveSignBits(proc, state_element, orig_init_value,
                                          /*real_size=*/signed_bits));
       made_changes = true;
     }

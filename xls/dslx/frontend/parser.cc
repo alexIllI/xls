@@ -74,6 +74,7 @@ constexpr std::string_view kSelfOutsideImplError =
     "Type `Self` cannot be used outside of a `trait` or `impl`";
 constexpr std::string_view kConstAssertIdentifier = "const_assert!";
 constexpr std::string_view kAssertFmtMacroIdentifier = "assert_fmt!";
+constexpr std::string_view kSpawnIdentifier = "spawn";
 
 absl::StatusOr<std::vector<ExprOrType>> CloneParametrics(
     absl::Span<const ExprOrType> eots) {
@@ -546,20 +547,21 @@ absl::StatusOr<std::unique_ptr<Module>> Parser::ParseModule(
         XLS_ASSIGN_OR_RETURN(
             ModuleMember proc_or_proc_def,
             ParseProc(*module_member_start_pos, is_public, *bindings));
+
+        // Note: the possibilities here are legacy `Proc`, impl-style `ProcDef`,
+        // or legacy `ProcAlias`. For the latter there is nothing special to do.
         if (std::holds_alternative<Proc*>(proc_or_proc_def)) {
           XLS_ASSIGN_OR_RETURN(
-              ModuleMember proc_or_wrapper,
+              proc_or_proc_def,
               ApplyProcAttributes(std::get<Proc*>(proc_or_proc_def),
                                   pending_attributes));
-          XLS_RETURN_IF_ERROR(
-              module_->AddTop(proc_or_wrapper, make_collision_error));
-        } else {
-          // impl-style ProcDef case. These are a WIP and don't support any
-          // attributes yet.
-          XLS_RETURN_IF_ERROR(verify_no_attributes());
-          XLS_RETURN_IF_ERROR(
-              module_->AddTop(proc_or_proc_def, make_collision_error));
+        } else if (std::holds_alternative<ProcDef*>(proc_or_proc_def)) {
+          XLS_RETURN_IF_ERROR(ApplyProcDefAttributes(
+              std::get<ProcDef*>(proc_or_proc_def), pending_attributes));
         }
+
+        XLS_RETURN_IF_ERROR(
+            module_->AddTop(proc_or_proc_def, make_collision_error));
         break;
       }
       case Keyword::kImport: {
@@ -1103,21 +1105,23 @@ absl::StatusOr<ModuleMember> Parser::ApplyFunctionAttributes(
 
 absl::StatusOr<XlsTuple*> Parser::ParseFuzzTestDomains(
     std::string_view domains_str, Bindings& bindings) {
-  std::string wrapped = absl::StrCat("(", domains_str, ")");
+  // Force it to be a tuple via the trailing comma. Otherwise, if the user
+  // writes `#[fuzz_test(domains="(u32:1, u32:2)")]` the parser will fail to
+  // parse the domain as a 1-element tuple (containing a 2-element tuple).
+  std::string wrapped = absl::StrCat("(", domains_str, ",)");
   Scanner domain_scanner(file_table(), scanner().fileno(), wrapped);
   Parser sub_parser(module_, &domain_scanner, parse_fn_stubs_);
 
   XLS_ASSIGN_OR_RETURN(Expr * parsed, sub_parser.ParseExpression(bindings));
 
-  if (parsed->kind() == AstNodeKind::kXlsTuple) {
-    auto* tuple = dynamic_cast<XlsTuple*>(parsed);
-    if (!tuple->members().empty()) {
-      return tuple;
-    }
+  if (parsed->in_parens()) {
+    // We don't need the parens anymore, because it's already parsed.
+    parsed->set_in_parens(false);
   }
-  // If it's not already a tuple, wrap it in one.
-  return module_->Make<XlsTuple>(parsed->span(), std::vector<Expr*>{parsed},
-                                 /*has_trailing_comma=*/false);
+  // We know it must be a tuple because of the parens and trailing comma we
+  // added.
+  XLS_RET_CHECK_EQ(parsed->kind(), AstNodeKind::kXlsTuple);
+  return dynamic_cast<XlsTuple*>(parsed);
 }
 
 template <typename T>
@@ -1219,6 +1223,18 @@ absl::StatusOr<ModuleMember> Parser::ApplyProcAttributes(
   return p;
 }
 
+absl::Status Parser::ApplyProcDefAttributes(
+    ProcDef* p, std::vector<Attribute*> attributes) {
+  for (Attribute* next : attributes) {
+    if (next->attribute_kind() != AttributeKind::kDerive) {
+      return UnsupportedAttributeError(*next);
+    }
+  }
+
+  p->SetAttributes(attributes);
+  return absl::OkStatus();
+}
+
 absl::StatusOr<Expr*> Parser::ParseExpression(Bindings& bindings,
                                               ExprRestrictions restrictions) {
   XLS_ASSIGN_OR_RETURN(std::optional<Token> hash,
@@ -1254,7 +1270,7 @@ absl::StatusOr<Expr*> Parser::ParseExpression(Bindings& bindings,
   if (peek->IsKeyword(Keyword::kChan)) {
     return ParseChannelDecl(bindings, channel_config);
   }
-  if (peek->IsKeyword(Keyword::kSpawn)) {
+  if (peek->IsIdentifier(kSpawnIdentifier)) {
     return ParseSpawn(bindings);
   }
   if (peek->kind() == TokenKind::kOBrace) {
@@ -3084,9 +3100,9 @@ absl::StatusOr<Expr*> Parser::BuildMacroOrInvocation(
 }
 
 absl::StatusOr<Spawn*> Parser::ParseSpawn(Bindings& bindings) {
-  XLS_ASSIGN_OR_RETURN(Token spawn, PopKeywordOrError(Keyword::kSpawn));
+  Span spawn_span;
+  XLS_RETURN_IF_ERROR(PopIdentifierOrError(&spawn_span).status());
   XLS_ASSIGN_OR_RETURN(auto name_or_colon_ref, ParseNameOrColonRef(bindings));
-
   std::vector<ExprOrType> parametrics;
   XLS_ASSIGN_OR_RETURN(bool peek_is_oangle, PeekTokenIs(TokenKind::kOAngle));
   if (peek_is_oangle) {
@@ -3181,7 +3197,7 @@ absl::StatusOr<Spawn*> Parser::ParseSpawn(Bindings& bindings) {
       Span(next_start, next_limit), next_ref,
       std::vector<Expr*>({init_invocation}), std::move(next_parametrics));
 
-  return module_->Make<Spawn>(Span(spawn.span().start(), next_limit), spawnee,
+  return module_->Make<Spawn>(Span(spawn_span.start(), next_limit), spawnee,
                               config_invoc, next_invoc, std::move(parametrics));
 }
 
@@ -3734,6 +3750,7 @@ absl::StatusOr<ModuleMember> Parser::ParseProcLike(const Pos& start_pos,
         span, name_def, std::move(parametric_bindings),
         ConvertProcMembersToStructMembers(module_, proc_like_body.members),
         is_public);
+    name_def->set_definer(proc_def);
     outer_bindings.Add(name_def->identifier(), proc_def);
     return proc_def;
   }

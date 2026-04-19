@@ -338,7 +338,6 @@ cc_library(
         ":comment_data",
         ":pos",
         ":token",
-        "//xls/common:test_macros",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
         "@com_google_absl//absl/base:core_headers",
@@ -352,6 +351,7 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/types:span",
+        "@googletest//:gtest_prod",
     ],
 )
 
@@ -752,8 +752,10 @@ cc_library(
         ":pos",
         ":token",
         ":token_utils",
+        "//xls/common:attribute_data",
         "//xls/common/status:ret_check",
         "//xls/common/status:status_macros",
+        "//xls/dslx:errors",
         "//xls/dslx:import_data",
         "//xls/dslx:warning_collector",
         "//xls/dslx:warning_kind",

@@ -46,6 +46,7 @@
 #include "xls/dslx/type_system/type.h"
 #include "xls/dslx/type_system/type_info.h"
 #include "xls/dslx/type_system/unwrap_meta_type.h"
+#include "xls/dslx/type_system_v2/import_utils.h"
 #include "xls/dslx/type_system_v2/inference_table.h"
 #include "xls/dslx/warning_collector.h"
 #include "xls/dslx/warning_kind.h"
@@ -298,6 +299,36 @@ class TypeValidator : public AstNodeVisitorWithDefault {
     return DefaultHandler(cast);
   }
 
+  absl::Status HandleFunction(const Function* node) override {
+    XLS_ASSIGN_OR_RETURN(bool is_proc_def_next,
+                         IsProcDefNextFunction(node, import_data_));
+    if (is_proc_def_next) {
+      return ValidateProcDefNextFunction(node);
+    }
+
+    AstNode* parent = node->parent();
+    if (parent == nullptr || parent->kind() != AstNodeKind::kFuzzTestFunction) {
+      return DefaultHandler(node);
+    }
+    const FuzzTestFunction* ftf =
+        absl::down_cast<const FuzzTestFunction*>(parent);
+    if (!ftf->domains().has_value()) {
+      return DefaultHandler(node);
+    }
+
+    const XlsTuple* tuple = *ftf->domains();
+    int64_t domain_count = tuple->members().size();
+    // Compare domains to params as appropriate, e.g., a u32 parameter
+    // should be fuzzed using a u32 range domain or array domain.
+    for (int i = 0; i < domain_count; ++i) {
+      const Expr* domain = tuple->members()[i];
+      const Param* param = node->params()[i];
+      XLS_RETURN_IF_ERROR(ValidateFuzzTestDomain(domain, param));
+    }
+
+    return DefaultHandler(node);
+  }
+
   // TODO: In type_annotation_resolver.cc ResolveElementType, if the container
   // type of ElementTypeNotation is not a subscriptable type, it just returns
   // the container type without reporting an error, so it must be checked here.
@@ -423,6 +454,82 @@ class TypeValidator : public AstNodeVisitorWithDefault {
   }
 
  private:
+  // Validates that a fuzz test domain type is compatible with the corresponding
+  // parameter type, recursively for tuples.
+  absl::Status ValidateFuzzTestDomainType(const Type* domain_type,
+                                          const Type* param_type,
+                                          const Span& span,
+                                          std::string_view domain_str,
+                                          std::string_view param_str) {
+    if (domain_type->IsTuple()) {
+      const TupleType& domain_tuple = domain_type->AsTuple();
+      if (domain_tuple.empty()) {
+        // Empty domain for this parameter; this is considered an "Arbitrary"
+        // domain and always matches.
+        return absl::OkStatus();
+      }
+      if (!param_type->IsTuple()) {
+        return TypeInferenceErrorStatus(
+            span, param_type,
+            "Fuzz test domain implies a tuple type, but parameter is not a "
+            "tuple.",
+            file_table_);
+      }
+      const TupleType& param_tuple = param_type->AsTuple();
+      if (domain_tuple.size() != param_tuple.size()) {
+        return TypeInferenceErrorStatus(
+            span, param_type,
+            absl::Substitute("Fuzz test domain tuple size ($0) does not match "
+                             "parameter tuple size ($1).",
+                             domain_tuple.size(), param_tuple.size()),
+            file_table_);
+      }
+      for (int i = 0; i < domain_tuple.size(); ++i) {
+        const Type& domain_member = domain_tuple.GetMemberType(i);
+        const Type& param_member = param_tuple.GetMemberType(i);
+        XLS_RETURN_IF_ERROR(ValidateFuzzTestDomainType(
+            &domain_member, &param_member, span, domain_member.ToString(),
+            param_member.ToString()));
+      }
+      return absl::OkStatus();
+    }
+
+    if (domain_type->IsArray()) {
+      const ArrayType& array_type = domain_type->AsArray();
+      const Type& element_type = array_type.element_type();
+      if (!param_type->CompatibleWith(element_type)) {
+        return TypeInferenceErrorStatus(
+            span, param_type,
+            absl::Substitute("Fuzz test domain `$0` is not compatible with "
+                             "parameter `$1`.",
+                             domain_str, param_str),
+            file_table_);
+      }
+      return absl::OkStatus();
+    }
+
+    return TypeInferenceErrorStatus(
+        span, param_type,
+        absl::Substitute("Unsupported fuzz test domain `$0` of type `$1`.",
+                         domain_str, domain_type->ToString()),
+        file_table_);
+  }
+
+  // Validates that a fuzz test domain is compatible with the corresponding
+  // function parameter. Returns an error if not compatible.
+  absl::Status ValidateFuzzTestDomain(const Expr* domain, const Param* param) {
+    std::optional<Type*> maybe_param_type = ti_.GetItem(param);
+    XLS_RET_CHECK(maybe_param_type.has_value());
+    const Type* param_type = *maybe_param_type;
+
+    std::optional<Type*> maybe_domain_type = ti_.GetItem(domain);
+    XLS_RET_CHECK(maybe_domain_type.has_value());
+    const Type* domain_type = *maybe_domain_type;
+
+    return ValidateFuzzTestDomainType(domain_type, param_type, domain->span(),
+                                      domain->ToString(), param->ToString());
+  }
+
   absl::Status ValidateBinopShift(const Binop& binop) {
     XLS_ASSIGN_OR_RETURN(Type * rhs_type, ti_.GetItemOrError(binop.rhs()));
     XLS_ASSIGN_OR_RETURN(
@@ -543,6 +650,35 @@ class TypeValidator : public AstNodeVisitorWithDefault {
             "either both-arrays or both-bits; got lhs: `%s`; rhs: `%s`",
             lhs->ToString(), rhs->ToString()),
         file_table_);
+  }
+
+  absl::Status ValidateProcDefNextFunction(const Function* f) {
+    XLS_ASSIGN_OR_RETURN(std::optional<const StructDefBase*> proc,
+                         GetStructOrProcDef(f, import_data_));
+    XLS_RET_CHECK(proc.has_value());
+
+    const FunctionType& type = type_->AsFunction();
+    if (!type.return_type().IsUnit()) {
+      return TypeInferenceErrorStatus(f->return_type()->span(), nullptr,
+                                      "The next() function of a `proc` with an "
+                                      "`impl` must not return anything.",
+                                      file_table_);
+    }
+
+    if (type.params().size() != 1 || !type.params()[0]->IsProc() ||
+        &type.params()[0]->AsProc().struct_def_base() != *proc) {
+      Span span = type.params().empty()
+                      ? f->name_def()->span()
+                      : Span(f->params().front()->span().start(),
+                             f->params().back()->span().limit());
+      return TypeInferenceErrorStatus(
+          span, nullptr,
+          "The next() function of a `proc` with an `impl` must have a single "
+          "parameter, which is the `proc` instance, typically named 'self'.",
+          file_table_);
+    }
+
+    return absl::OkStatus();
   }
 
   absl::Status ValidateSliceLhs(const Index* index) {

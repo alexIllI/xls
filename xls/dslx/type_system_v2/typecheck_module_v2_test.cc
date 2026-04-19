@@ -35,6 +35,7 @@
 namespace xls::dslx {
 namespace {
 
+using ::absl_testing::IsOk;
 using ::absl_testing::IsOkAndHolds;
 using ::testing::AllOf;
 using ::testing::HasSubstr;
@@ -7811,6 +7812,125 @@ impl P {
           HasNodeWithType("next", absl::Substitute("($0) -> ()", kProcType)))));
 }
 
+TEST(TypecheckV2Test, ProcWithImplNextWithExtraParamFails) {
+  EXPECT_THAT(
+      R"(
+#![feature(explicit_state_access)]
+
+proc P {
+  state: u32,
+}
+
+impl P {
+    fn new(init_val: u32) -> Self {
+      P { state: init_val }
+    }
+
+    fn next(self, a: u32) {}
+}
+)",
+      TypecheckFails(HasSubstr("The next() function of a `proc` with an `impl` "
+                               "must have a single parameter")));
+}
+
+TEST(TypecheckV2Test, ProcWithImplNextWithNoParamsFails) {
+  EXPECT_THAT(
+      R"(
+#![feature(explicit_state_access)]
+
+proc P {
+  state: u32,
+}
+
+impl P {
+    fn new(init_val: u32) -> Self {
+      P { state: init_val }
+    }
+
+    fn next() {}
+}
+)",
+      TypecheckFails(HasSubstr("The next() function of a `proc` with an `impl` "
+                               "must have a single parameter")));
+}
+
+TEST(TypecheckV2Test, ProcWithImplNextWithReturnTypeFails) {
+  EXPECT_THAT(
+      R"(
+#![feature(explicit_state_access)]
+
+proc P {
+  state: u32,
+}
+
+impl P {
+    fn new(init_val: u32) -> Self {
+      P { state: init_val }
+    }
+
+    fn next() -> u32 { 0 }
+}
+)",
+      TypecheckFails(HasSubstr("The next() function of a `proc` with an `impl` "
+                               "must not return anything")));
+}
+
+TEST(TypecheckV2Test, SpawnProcWithImpl) {
+  std::string_view kProgram = R"(
+#![feature(explicit_state_access)]
+
+// The derive attribute here is unnecessary, but having it proves it does no
+// harm.
+#[derive(Spawn)]
+proc P {
+    c_out: chan<u32> out,
+    i: u32,
+}
+
+impl P {
+    fn new(c_out: chan<u32> out) -> Self {
+        P { c_out: c_out, i: 0 }
+    }
+
+    fn next(self) {
+        let last_i = read(self.i);
+        send(join(), self.c_out, last_i);
+        write(self.i, last_i + 1);
+    }
+}
+
+proc C {
+    c_in: chan<u32> in,
+    i: u32,
+}
+
+impl C {
+    fn new(c_in: chan<u32> in) -> Self {
+        C { c_in: c_in, i: 0 }
+    }
+    fn next(self) {
+        let last_i = read(self.i);
+        let (tok1, e) = recv(join(), self.c_in);
+        write(self.i, e + last_i);
+    }
+}
+
+proc Main {}
+
+impl Main {
+    fn new() -> Self {
+        let (c_out, c_in) = chan<u32>("my_chan");
+        P::new(c_out).spawn();
+        let c = C::new(c_in);
+        c.spawn();
+        Main {}
+    }
+}
+)";
+
+  XLS_EXPECT_OK(TypecheckV2(kProgram));
+}
+
 TEST(TypecheckV2Test, ImportParametricFunctionWithDefaultExpression) {
   constexpr std::string_view kImported = R"(
 pub fn some_function<N: u32, M: u32 = {N + 1}>() -> uN[M] { uN[M]:0 }
@@ -10024,5 +10144,259 @@ proc Counter {
               TypecheckFails(HasSubstr("State {} Binary operations can only be "
                                        "applied to bits-typed operands.")));
 }
+
+TEST(TypecheckV2Test, FuzzTestDomainsSuccess) {
+  EXPECT_THAT(R"(
+#[fuzz_test(domains=`u32:0..1`)]
+fn f(x: u32) {}
+)",
+              TypecheckSucceeds(::testing::_));
+}
+
+TEST(TypecheckV2Test, FuzzTestBadRange) {
+  EXPECT_THAT(R"(
+#[fuzz_test(domains=`u32:0..u64:1`)]
+fn f(x: u32) {}
+)",
+              TypecheckFails(HasSizeMismatch("u32", "u64")));
+}
+
+TEST(TypecheckV2Test, FuzzTestDomainRangeBitSizeMismatch) {
+  EXPECT_THAT(
+      R"(
+#[fuzz_test(domains=`u32:0..16384, u32:0..u32:16284`)]
+fn f(x: u8, y:u32) {}
+)",
+      TypecheckFails(HasSubstr("Fuzz test domain `u32:0..16384` is not "
+                               "compatible with parameter `x: u8`")));
+}
+
+TEST(TypecheckV2Test, FuzzTestDomainBitSizeMismatchAlias) {
+  EXPECT_THAT(
+      R"(
+type u8_alias = u8;
+#[fuzz_test(domains=`u32:0..16384`)]
+fn f(x: u8_alias) {}
+)",
+      TypecheckFails(HasSubstr("Fuzz test domain `u32:0..16384` is not "
+                               "compatible with parameter `x: u8_alias`")));
+}
+
+TEST(TypecheckV2Test, FuzzTestDomainArrayMismatch) {
+  EXPECT_THAT(
+      R"(
+#[fuzz_test(domains=`[u32:0, 16384]`)]
+fn f(x: u8) {}
+)",
+      TypecheckFails(HasSubstr("Fuzz test domain `[u32:0, 16384]` is not "
+                               "compatible with parameter `x: u8`")));
+}
+
+TEST(TypecheckV2Test, FuzzTestDomainNotSupported) {
+  EXPECT_THAT(
+      R"(
+#[fuzz_test(domains=`u8:0`)]
+fn f(x: u8) {}
+)",
+      TypecheckFails(HasSubstr("Unsupported fuzz test domain `u8:0`")));
+}
+
+TEST(TypecheckV2Test, FuzzTestDomainsEmptyTupleAlwaysMatches) {
+  EXPECT_THAT(R"(
+#[fuzz_test(domains=`()`)]
+fn f(x: u8) {}
+)",
+              TypecheckSucceeds(::testing::_));
+}
+
+TEST(TypecheckV2Test, FuzzTestEmptyTupleDomainAlwaysMatchesMultipleParams) {
+  EXPECT_THAT(R"(
+#[fuzz_test(domains=`u32:0..1, ()`)]
+fn f(x: u32, y: u8) {}
+)",
+              TypecheckSucceeds(::testing::_));
+}
+
+TEST(TypecheckV2Test, FuzzTestConstRange) {
+  EXPECT_THAT(R"(
+const C = u32:0..1;
+#[fuzz_test(domains=`C`)]
+fn f(x: u32) {}
+)",
+              TypecheckSucceeds(::testing::_));
+}
+
+TEST(TypecheckV2Test, FuzzTestConstRangeMismatch) {
+  EXPECT_THAT(R"(
+const C = u32:0..1;
+#[fuzz_test(domains=`C`)]
+fn f(x: u8) {}
+)",
+              TypecheckFails(HasSubstr("Fuzz test domain `C` is not "
+                                       "compatible with parameter `x: u8`")));
+}
+
+TEST(TypecheckV2Test, FuzzTestEnum) {
+  EXPECT_THAT(R"(
+enum E {
+  E0 = 0,
+  E1 = 1,
+}
+#[fuzz_test(domains=`[E::E0, E::E1]`)]
+fn f(x: E) {}
+)",
+              TypecheckSucceeds(::testing::_));
+}
+
+TEST(TypecheckV2Test, FuzzTestImportedEnum) {
+  constexpr std::string_view kImported = R"(
+pub enum E {
+  E0 = 0,
+  E1 = 1,
+}
+)";
+  constexpr std::string_view kProgram = R"(
+import imported;
+#[fuzz_test(domains=`[imported::E::E0, imported::E::E1]`)]
+fn f(x: imported::E) {}
+)";
+  ImportData import_data = CreateImportDataForTest();
+  XLS_EXPECT_OK(TypecheckV2(kImported, "imported", &import_data));
+  EXPECT_THAT(TypecheckV2(kProgram, "main", &import_data), IsOk());
+}
+
+TEST(TypecheckV2Test, FuzzTestTupleDomainSuccess) {
+  EXPECT_THAT(R"(
+const D = (u32:0..1, u8:0..2);
+#[fuzz_test(domains=`D`)]
+fn f(x: (u32, u8)) {}
+)",
+              TypecheckSucceeds(::testing::_));
+}
+
+TEST(TypecheckV2Test, FuzzTestTupleDomainWithAliasSuccess) {
+  EXPECT_THAT(R"(
+type my_tuple = (u32, u8);
+const D = (u32:0..1, u8:0..2);
+#[fuzz_test(domains=`D`)]
+fn f(x: my_tuple) {}
+)",
+              TypecheckSucceeds(::testing::_));
+}
+
+TEST(TypecheckV2Test, FuzzTestTupleDomainNestedSuccess) {
+  EXPECT_THAT(R"(
+const D = ((u32:0..1, u8:0..2), u16:0..3);
+#[fuzz_test(domains=`D`)]
+fn f(x: ((u32, u8), u16)) {}
+)",
+              TypecheckSucceeds(::testing::_));
+}
+
+TEST(TypecheckV2Test, FuzzTestTupleDomainSizeMismatch) {
+  EXPECT_THAT(R"(
+const D = (u32:0..1, u8:0..2, u16:0..3);
+#[fuzz_test(domains=`D`)]
+fn f(x: (u32, u8)) {}
+)",
+              TypecheckFails(HasSubstr("Fuzz test domain tuple size (3) does "
+                                       "not match parameter tuple size (2)")));
+}
+
+TEST(TypecheckV2Test, FuzzTestTupleDomainTypeMismatch) {
+  EXPECT_THAT(
+      R"(
+const D = (u32:0..1, u16:0..2);
+#[fuzz_test(domains=`D`)]
+fn f(x: (u32, u8)) {}
+)",
+      TypecheckFails(HasSubstr("is not compatible with parameter")));
+}
+
+TEST(TypecheckV2Test, FuzzTestTupleDomainNotATuple) {
+  EXPECT_THAT(R"(
+#[fuzz_test(domains=`u32:0..1`)]
+fn f(x: (u32, u8)) {}
+)",
+              TypecheckFails(HasSubstr("is not compatible with parameter")));
+}
+
+TEST(TypecheckV2Test, FuzzTestTupleDomainParamNotATuple) {
+  EXPECT_THAT(R"(
+const D = (u32:0..1, u32:0..2);
+#[fuzz_test(domains=`D`)]
+fn f(x: u32) {}
+)",
+              TypecheckFails(HasSubstr("Fuzz test domain implies a tuple type, "
+                                       "but parameter is not a tuple")));
+}
+
+TEST(TypecheckV2Test, FuzzTestTupleDomainDirectSuccess) {
+  EXPECT_THAT(R"(
+#[fuzz_test(domains=`(u32:0..1, u8:0..2)`)]
+fn f(x: (u32, u8)) {}
+)",
+              TypecheckSucceeds(::testing::_));
+}
+
+TEST(TypecheckV2Test, FuzzTestTupleDomainMismatch) {
+  EXPECT_THAT(
+      R"(
+#[fuzz_test(domains=`u32:0..1, u8:0..2`)]
+fn f(x: (u32, u8)) {}
+)",
+      TypecheckFails(HasSubstr("fuzz_test attribute has 2 domain arguments, "
+                               "but function `f` has 1 parameter")));
+}
+
+TEST(TypecheckV2Test, FuzzTestCountMismatchTooMany) {
+  EXPECT_THAT(
+      R"(
+#[fuzz_test(domains=`u32:0..1, u32:0..2`)]
+fn f(x: u32) {}
+)",
+      TypecheckFails(HasSubstr("fuzz_test attribute has 2 domain arguments, "
+                               "but function `f` has 1 parameter")));
+}
+
+TEST(TypecheckV2Test, FuzzTestCountMismatchTooFew) {
+  EXPECT_THAT(
+      R"(
+#[fuzz_test(domains=`u32:0..1`)]
+fn g(x: u32, y: u32) {}
+)",
+      TypecheckFails(HasSubstr("fuzz_test attribute has 1 domain argument, "
+                               "but function `g` has 2 parameters")));
+}
+
+TEST(TypecheckV2Test, FuzzTestNoParameters) {
+  EXPECT_THAT(
+      R"(
+#[fuzz_test]
+fn f() {}
+)",
+      TypecheckFails(HasSubstr("Can only fuzz test functions with at least 1 "
+                               "parameter; function `f` has 0")));
+}
+
+TEST(TypecheckV2Test, FuzzTestParametric) {
+  EXPECT_THAT(
+      R"(
+#[fuzz_test(domains=`u32:0..1`)]
+fn f<N: u32>(x: uN[N]) {
+   x+uN[N]:1
+}
+)",
+      TypecheckFails(HasSubstr("Cannot fuzz test parametric function `f`")));
+}
+
+TEST(TypecheckV2Test, FuzzTestAttributeWithZeroArguments) {
+  EXPECT_THAT(R"(
+#[fuzz_test]
+fn f(x: u32) {}
+)",
+              TypecheckSucceeds(::testing::_));
+}
+
 }  // namespace
 }  // namespace xls::dslx

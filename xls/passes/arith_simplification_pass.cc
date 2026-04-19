@@ -408,11 +408,10 @@ absl::StatusOr<bool> MatchComparisonOfInjectiveOp(
       new_op = binary_op->operand;
     } else {
       XLS_ASSIGN_OR_RETURN(
-          new_op,
-          node->function_base()->MakeNodeWithName<ExtendOp>(
-              binary_op->operand->loc(), binary_op->operand,
-              solution.bit_count(), Op::kZeroExt,
-              absl::StrFormat("%s_extended", binary_op->operand->GetName())));
+          new_op, node->function_base()->MakeNodeWithName<ExtendOp>(
+                      binary_op->operand->loc(), binary_op->operand,
+                      solution.bit_count(), Op::kZeroExt,
+                      NodeNameFormat("%s_extended", binary_op->operand)));
     }
   }
   XLS_ASSIGN_OR_RETURN(
@@ -2277,7 +2276,9 @@ absl::StatusOr<bool> ArithSimplificationPass::RunOnFunctionBaseInternal(
   StatelessQueryEngine query_engine;
   do {
     pass_changed = false;
-    for (Node* n : context.ReverseTopoSort(f)) {
+    XLS_ASSIGN_OR_RETURN(std::vector<Node*> reverse_topo_sort_nodes,
+                         context.ReverseTopoSort(f));
+    for (Node* n : reverse_topo_sort_nodes) {
       if (n->IsDead()) {
         continue;
       }

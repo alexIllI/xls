@@ -153,10 +153,7 @@ class AssociativeElements {
         return node;
       }
       return node->function_base()->MakeNodeWithName<UnOp>(
-          node->loc(), node, Op::kNeg,
-          node->HasAssignedName()
-              ? absl::StrCat(node->GetNameView(), "_negated")
-              : "");
+          node->loc(), node, Op::kNeg, NodeNameConcat(node, "_negated"));
     }
     bool operator==(const NodeData& nd) const {
       return node == nd.node && needs_negate == nd.needs_negate;
@@ -882,11 +879,13 @@ class Reassociation {
       first = false;
       // We always need to run through the candidates in topo order to ensure we
       // don't duplicate nodes.
+      XLS_ASSIGN_OR_RETURN(std::vector<Node*> topo_sort_nodes,
+                           context_.TopoSort(fb_));
       for (Node* node : iter::filter(
                [&](Node* n) -> bool {
                  return was_first || current_worklist.contains(n);
                },
-               context_.TopoSort(fb_))) {
+               topo_sort_nodes)) {
         if (!node->GetType()->IsBits()) {
           VLOG(5) << "Skipping " << node << " due to non-bits types";
           continue;
@@ -1134,10 +1133,7 @@ class Reassociation {
     };
     absl::c_sort(variable_elements, elements_cmp);
     std::string associative_sum_name =
-        elements.node()->HasAssignedName()
-            ? absl::StrCat(elements.node()->GetNameView(),
-                           "_associative_element")
-            : "";
+        NodeNameConcat(elements.node(), "_associative_element");
     auto sum_width = [&](int64_t lhs_width, int64_t rhs_width) -> int64_t {
       int64_t max = elements.node()->BitCountOrDie();
       switch (*elements.op()) {
@@ -1288,8 +1284,7 @@ class Reassociation {
                         elements.op()));
     }
     // give the replacement the original name.
-    std::string original_name =
-        elements.node()->HasAssignedName() ? elements.node()->GetName() : "";
+    std::string original_name = NodeNameConcat(elements.node());
     if (replacement.node->BitCountOrDie() != elements.node()->BitCountOrDie()) {
       XLS_ASSIGN_OR_RETURN(
           replacement.node,

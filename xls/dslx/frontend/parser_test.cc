@@ -1329,6 +1329,51 @@ proc main {
   RoundTrip(std::string(kModule));
 }
 
+TEST_F(ParserTest, ParseImplBasedProcNetwork) {
+  std::string_view kModule = R"(#![feature(explicit_state_access)]
+
+proc P {
+    c_out: chan<u32> out,
+    i: u32,
+}
+impl P {
+    fn new(c_out: chan<u32> out) -> Self {
+        P { c_out: c_out, i: 0 }
+    }
+    fn next(self) {
+        let last_i = read(self.i);
+        send(join(), self.c_out, last_i);
+        write(self.i, last_i + 1);
+    }
+}
+proc C {
+    c_in: chan<u32> in,
+    i: u32,
+}
+impl C {
+    fn new(c_in: chan<u32> in) -> Self {
+        C { c_in: c_in, i: 0 }
+    }
+    fn next(self) {
+        let last_i = read(self.i);
+        let (tok1, e) = recv(join(), self.c_in);
+        write(self.i, e + last_i);
+    }
+}
+proc Main {
+}
+impl Main {
+    fn new() -> Self {
+        let (c_out, c_in) = chan<u32>("my_chan");
+        P::new(c_out, 0).spawn();
+        let c = C::new(c_in);
+        c.spawn();
+    }
+})";
+
+  RoundTrip(std::string(kModule));
+}
+
 // Parses the "iota" example with fifo_depth set on the internal channel.
 TEST_F(ParserTest, ParseProcNetworkWithFifoDepthOnInternalChannel) {
   std::string_view kModule = R"(proc producer {
@@ -4542,6 +4587,7 @@ fn f(x: u32) {}
         dynamic_cast<const XlsTuple*>(ftf->domains().value());
     ASSERT_NE(tuple, nullptr);
     ASSERT_EQ(tuple->members().size(), 1);
+    ASSERT_EQ(tuple->members()[0]->ToString(), "u32:0..1");
     const Range* range = dynamic_cast<const Range*>(tuple->members()[0]);
     ASSERT_NE(range, nullptr);
     const Number* start = dynamic_cast<const Number*>(range->start());
@@ -4592,12 +4638,14 @@ fn f(x: u32, op: Op) {}
     const Array* array1 = dynamic_cast<const Array*>(tuple->members()[0]);
     ASSERT_NE(array1, nullptr);
     ASSERT_EQ(array1->members().size(), 2);
+    ASSERT_FALSE(array1->in_parens());
     EXPECT_EQ(array1->members()[0]->ToString(), "u32:0");
     EXPECT_EQ(array1->members()[1]->ToString(), "u32:10");
 
     // Second member is an Array: [Op::Add, Op::Sub]
     const Array* array2 = dynamic_cast<const Array*>(tuple->members()[1]);
     ASSERT_NE(array2, nullptr);
+    ASSERT_FALSE(array2->in_parens());
     ASSERT_EQ(array2->members().size(), 2);
     const ColonRef* cref1 = dynamic_cast<const ColonRef*>(array2->members()[0]);
     ASSERT_NE(cref1, nullptr);
